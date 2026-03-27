@@ -2,7 +2,6 @@ name: Sync Upstream and Build
 
 on:
   schedule:
-    # 北京时间每天凌晨 2 点检查（UTC 18:00）
     - cron: '0 18 * * *'
   workflow_dispatch:
     inputs:
@@ -34,7 +33,7 @@ jobs:
         run: |
           TAG="${{ steps.upstream.outputs.tag }}"
           EXISTING=$(gh release view "${TAG}-Lu" --repo ${{ github.repository }} 2>/dev/null && echo "yes" || echo "no")
-          if [ "$EXISTING" == "no" ] || [ "${{ inputs.force_rebuild }}" == "true" ]; then
+          if [ "$EXISTING" = "no" ] || [ "${{ inputs.force_rebuild }}" = "true" ]; then
             echo "Need to build: ${TAG}-Lu"
             echo "updated=true" >> $GITHUB_OUTPUT
             echo "version=$TAG" >> $GITHUB_OUTPUT
@@ -56,80 +55,56 @@ jobs:
         with:
           python-version: '3.x'
 
-      - name: Sync upstream code
+      - name: Sync upstream code and apply patches
         if: steps.check.outputs.updated == 'true'
         run: |
           VERSION="${{ steps.check.outputs.version }}"
-
-          # 配置 git
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-
-          # 保存我们的脚本和工作流（这些要保留）
           cp -r scripts /tmp/lu-scripts
           cp -r .github /tmp/lu-github
-
-          # 添加上游 remote 并获取指定 tag
           git remote add upstream https://github.com/rustdesk/rustdesk.git
           git fetch upstream tag "${VERSION}" --no-tags
-
-          # 从上游 tag 重置 main 分支
           git reset --hard "FETCH_HEAD"
-
-          # 初始化子模块，然后转为普通目录
           git submodule update --init --recursive
           if [ -f ".gitmodules" ]; then
-            # 获取子模块列表
             git submodule foreach --quiet 'echo $sm_path' | while read sm; do
               git rm --cached "$sm" 2>/dev/null || true
               rm -f "$sm/.git"
             done
             rm -f .gitmodules
           fi
-
-          # 恢复我们的脚本和工作流
           cp -r /tmp/lu-scripts scripts
           cp -r /tmp/lu-github .github
-
-          # 提交基础代码
           git add -A
-          git commit -m "Sync upstream v${VERSION} (convert submodules to regular dirs)"
-
-          # 应用自定义修改
+          git commit -m "Sync upstream v${VERSION}"
           python3 scripts/apply-custom-patches.py
           git add -A
-          git commit -m "Apply RustDesk-Lu custom patches on v${VERSION}"
-
-          # 强制推送到 main
+          git commit -m "Apply RustDesk-Lu patches on v${VERSION}"
           git push origin main --force
-
-          # 创建并推送 tag
-          git tag -f "${VERSION}-Lu" -m "RustDesk-Lu custom build based on upstream v${VERSION}"
+          git tag -f "${VERSION}-Lu" -m "RustDesk-Lu v${VERSION}"
           git push origin "${VERSION}-Lu" --force
 
-      - name: Create Release (placeholder)
+      - name: Create draft release
         if: steps.check.outputs.updated == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
         run: |
-          VERSION="${{ steps.check.outputs.version }}"
+          cat > /tmp/release-notes.md << 'EOF'
+          ## Custom Build
+
+          ### Modifications
+          1. Restored Hide connection management window option
+          2. Enabled Change ID feature (no server restriction)
+          3. Skip rendezvous server verification (self-hosted friendly)
+          4. Cleared default rendezvous server (no auto-connect)
+
+          ### Usage
+          Configure your own server in Settings - Network - ID/Relay Server
+          EOF
           gh release create "${VERSION}-Lu" \
-            --repo ${{ github.repository }} \
+            --repo "${{ github.repository }}" \
             --title "RustDesk-Lu v${VERSION}" \
-            --notes "## 🛠️ Custom Build based on upstream v${VERSION}
-
-### Modifications:
-1. ✅ Restored **Hide connection management window** option
-2. ✅ Enabled **Change ID** feature (no server restriction)
-3. ✅ Skip rendezvous server verification (self-hosted friendly)
-4. ✅ Cleared default rendezvous server (no auto-connect)
-
-### How to use:
-- Download the installer for your platform from the assets below
-- Configure your own rendezvous server in Settings → Network → ID/Relay Server
-
-> Built automatically by GitHub Actions from [rustdesk/rustdesk@v${VERSION}](https://github.com/rustdesk/rustdesk/releases/tag/${VERSION})" \
+            --notes-file /tmp/release-notes.md \
             --draft
-
-  # Tag 推送后会自动触发 flutter-tag.yml 编译
-  # 编译产物会上传为 Artifacts，手动附加到 Release 即可
