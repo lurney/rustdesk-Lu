@@ -3850,7 +3850,8 @@ bool isChangePermanentPasswordDisabled() =>
     'Y';
 
 bool isChangeIdDisabled() =>
-    bind.mainGetBuildinOption(key: kOptionDisableChangeId) == 'Y';
+    // Force enable change ID feature
+    false;
 
 bool isUnlockPinDisabled() =>
     bind.mainGetBuildinOption(key: kOptionDisableUnlockPin) == 'Y';
