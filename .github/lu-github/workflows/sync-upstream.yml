@@ -1,0 +1,114 @@
+name: Sync Upstream and Build
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even if version already exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+  packages: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.check.outputs.updated }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Get latest upstream tag
+        id: upstream
+        run: |
+          LATEST=$(git ls-remote --tags https://github.com/rustdesk/rustdesk.git \
+            | grep -oP 'refs/tags/\K[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)
+          echo "Latest upstream tag: $LATEST"
+          echo "tag=$LATEST" >> $GITHUB_OUTPUT
+
+      - name: Check if already built
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          EXISTING=$(gh release view "${TAG}-Lu" --repo ${{ github.repository }} 2>/dev/null && echo "yes" || echo "no")
+          if [ "$EXISTING" = "no" ] || [ "${{ inputs.force_rebuild }}" = "true" ]; then
+            echo "Need to build: ${TAG}-Lu"
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "version=$TAG" >> $GITHUB_OUTPUT
+          else
+            echo "Already built: ${TAG}-Lu"
+            echo "updated=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout our repo
+        if: steps.check.outputs.updated == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Setup Python
+        if: steps.check.outputs.updated == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Sync upstream code and apply patches
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          cp -r scripts /tmp/lu-scripts
+          cp -r .github /tmp/lu-github
+          git remote add upstream https://github.com/rustdesk/rustdesk.git
+          git fetch upstream tag "${VERSION}" --no-tags
+          git reset --hard "FETCH_HEAD"
+          git submodule update --init --recursive
+          if [ -f ".gitmodules" ]; then
+            git submodule foreach --quiet 'echo $sm_path' | while read sm; do
+              git rm --cached "$sm" 2>/dev/null || true
+              rm -f "$sm/.git"
+            done
+            rm -f .gitmodules
+          fi
+          cp -r /tmp/lu-scripts scripts
+          cp -r /tmp/lu-github .github
+          git add -A
+          git commit -m "Sync upstream v${VERSION}"
+          python3 scripts/apply-custom-patches.py
+          git add -A
+          git commit -m "Apply RustDesk-Lu patches on v${VERSION}"
+          git push origin main --force
+          git tag -f "${VERSION}-Lu" -m "RustDesk-Lu v${VERSION}"
+          git push origin "${VERSION}-Lu" --force
+
+      - name: Create draft release
+        if: steps.check.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.PAT_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          cat > /tmp/release-notes.md << 'EOF'
+          ## Custom Build
+
+          ### Modifications
+          1. Restored Hide connection management window option
+          2. Enabled Change ID feature (no server restriction)
+          3. Skip rendezvous server verification (self-hosted friendly)
+          4. Cleared default rendezvous server (no auto-connect)
+
+          ### Usage
+          Configure your own server in Settings - Network - ID/Relay Server
+          EOF
+          gh release create "${VERSION}-Lu" \
+            --repo "${{ github.repository }}" \
+            --title "RustDesk-Lu v${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            --draft
