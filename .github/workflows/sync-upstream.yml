@@ -113,19 +113,31 @@ jobs:
           VERSION: ${{ steps.check.outputs.version }}
         run: |
           cat > /tmp/release-notes.md << 'EOF'
-          ## RustDesk-Lu Custom Build (based on upstream v${VERSION})
+          ## RustDesk-Lu 定制构建（基于上游 v${VERSION}）
 
-          ### Modifications
-          1. Restored "Hide connection management window" (hide_cm) option
-          2. Enabled Change ID feature (no server restriction)
-          3. Skip rendezvous server verification (self-hosted friendly)
-          4. Cleared default rendezvous server (no auto-connect on start)
-          5. "Check for software update on startup" is off by default
-          6. Windows keyboard input uses key_down/key_up so AutoHotkey
-             hotkeys can detect VK events (macOS keeps key_sequence)
+          ### 本版本改动
+          1. 恢复「隐藏连接管理窗口」（hide_cm）选项——需永久密码 + 仅密码审批模式
+          2. 启用「修改 ID」功能，不受服务器限制
+          3. 自定义 ID 跳过 rendezvous 服务器校验（自建服务器友好）
+          4. 清除默认 rendezvous 服务器，启动不再自动连公共服务器
+          5. 「启动时检查软件更新」默认关闭
+          6. Windows 端键盘输入走 key_down/key_up，AutoHotkey 热键可正常检测（macOS 保持 key_sequence）
+          7. AppImage 构建作业已禁用（上游打包依赖已坏）
 
-          ### Usage
-          Configure your own server in Settings - Network - ID/Relay Server
+          ### 使用方法
+          在 设置 - 网络 - ID/中继服务器 中配置你自己的服务器（如 hbbs/relay 地址与公钥）。
+
+          ### macOS（Apple Silicon，含 M4）安装注意
+          - 请下载 aarch64 版 dmg（原生 ARM 构建，无需 Rosetta）
+          - 本构建未做苹果签名与公证，首次打开会被 Gatekeeper 拦截，三选一放行：
+            1. 右键（双指点）App →「打开」→ 再点「打开」
+            2. 系统设置 → 隐私与安全性 → 底部「仍要打开」
+            3. 终端执行：xattr -dr com.apple.quarantine /Applications/RustDesk.app
+          - 首次远程前需手动授予：辅助功能、屏幕录制、输入监控 三项权限，否则只能观看无法控制
+          - 需要无人值守常驻的，请通过 dmg 内菜单安装为系统服务，配合本版的隐藏 CM + 永久密码使用
+
+          ### 其他平台
+          Windows 建议用 msi/exe（x86_64），Linux 直接 dpkg -i deb 即可，本包已去除官方默认服务器配置。
           EOF
           sed -i "s/\${VERSION}/${VERSION}/g" /tmp/release-notes.md
           gh release create "${VERSION}-Lu" \
