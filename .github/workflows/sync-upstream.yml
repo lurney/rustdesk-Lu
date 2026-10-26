@@ -1,0 +1,142 @@
+name: Sync Upstream and Build
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even if version already exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.check.outputs.updated }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Get latest upstream tag
+        id: upstream
+        run: |
+          LATEST=$(git ls-remote --tags https://github.com/rustdesk/rustdesk.git \
+            | grep -oP 'refs/tags/\K[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)
+          echo "Latest upstream tag: $LATEST"
+          echo "tag=$LATEST" >> $GITHUB_OUTPUT
+
+      - name: Check if already built
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          if gh release view "${TAG}-Lu" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            EXISTING=yes
+          else
+            EXISTING=no
+          fi
+          if [ "$EXISTING" = "no" ] || [ "${{ inputs.force_rebuild }}" = "true" ]; then
+            echo "Need to build: ${TAG}-Lu"
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "version=$TAG" >> $GITHUB_OUTPUT
+          else
+            echo "Already built: ${TAG}-Lu"
+            echo "updated=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout our repo
+        if: steps.check.outputs.updated == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # PAT (not GITHUB_TOKEN) is REQUIRED for the push step below:
+          # pushes performed with the job's GITHUB_TOKEN do not trigger
+          # other workflows, so the "${VERSION}-Lu" tag push would never
+          # start lu-tag-build.yml (the full-platform build).
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Setup Python
+        if: steps.check.outputs.updated == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Sync upstream code and apply patches
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Save ONLY our Lu-specific workflow files before the hard reset.
+          # (The old blanket `cp -r .github /tmp && cp -r /tmp .github` both
+          # nested .github/lu-github/ by mistake AND restored already-patched
+          # files, breaking patch idempotency. Upstream-owned files must stay
+          # pristine across the reset so apply-custom-patches.py re-applies
+          # cleanly every sync.)
+          mkdir -p /tmp/lu-workflows
+          cp .github/workflows/sync-upstream.yml /tmp/lu-workflows/
+          cp .github/workflows/lu-tag-build.yml /tmp/lu-workflows/
+          cp scripts/apply-custom-patches.py /tmp/lu-workflows/
+          git remote add upstream https://github.com/rustdesk/rustdesk.git
+          git fetch upstream tag "${VERSION}" --no-tags
+          git reset --hard "FETCH_HEAD"
+          git submodule update --init --recursive
+          # flatten the hbb_common submodule into regular files
+          if [ -f ".gitmodules" ]; then
+            git submodule foreach --quiet 'echo $sm_path' | while read sm; do
+              git rm --cached "$sm" 2>/dev/null || true
+              rm -f "$sm/.git"
+            done
+            git rm -f .gitmodules
+          fi
+          cp /tmp/lu-workflows/sync-upstream.yml .github/workflows/
+          cp /tmp/lu-workflows/lu-tag-build.yml .github/workflows/
+          cp /tmp/lu-workflows/apply-custom-patches.py scripts/
+          git add -A
+          git commit -m "Sync upstream v${VERSION}"
+          python3 scripts/apply-custom-patches.py
+          git add -A
+          git commit -m "Apply RustDesk-Lu patches on v${VERSION}"
+          git push origin main --force
+          git tag -f "${VERSION}-Lu" -m "RustDesk-Lu v${VERSION}"
+          git push origin "${VERSION}-Lu" --force
+
+      - name: Create draft release
+        if: steps.check.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          cat > /tmp/release-notes.md << 'EOF'
+          ## RustDesk-Lu Custom Build (based on upstream v${VERSION})
+
+          ### Modifications
+          1. Restored "Hide connection management window" (hide_cm) option
+          2. Enabled Change ID feature (no server restriction)
+          3. Skip rendezvous server verification (self-hosted friendly)
+          4. Cleared default rendezvous server (no auto-connect on start)
+          5. "Check for software update on startup" is off by default
+          6. Windows keyboard input uses key_down/key_up so AutoHotkey
+             hotkeys can detect VK events (macOS keeps key_sequence)
+
+          ### Usage
+          Configure your own server in Settings - Network - ID/Relay Server
+          EOF
+          sed -i "s/\${VERSION}/${VERSION}/g" /tmp/release-notes.md
+          gh release create "${VERSION}-Lu" \
+            --repo "${{ github.repository }}" \
+            --title "RustDesk-Lu v${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            --draft
+
+  # NOTE on build triggering: the actual full-platform build is NOT started
+  # from this workflow. A job in the same run would still check out the
+  # pre-sync commit (runs are pinned to their triggering SHA). Instead, the
+  # "${VERSION}-Lu" tag pushed above triggers lu-tag-build.yml, whose run is
+  # pinned to the synced+patched commit and uploads artifacts into the
+  # draft release created above.
