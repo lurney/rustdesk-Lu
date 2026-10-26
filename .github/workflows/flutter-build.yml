@@ -2416,7 +2416,7 @@ jobs:
     name: Build appimage ${{ matrix.job.target }}
     needs: [build-rustdesk-linux]
     runs-on: ubuntu-22.04
-    if: ${{ inputs.upload-artifact }}
+    if: false  # RustDesk-Lu: appimage-builder pip bug (ignore_egg_info_in_manifest), re-enable upstream fix
     strategy:
       fail-fast: false
       matrix:

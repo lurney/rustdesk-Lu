@@ -1867,7 +1867,11 @@ fn process_chr(en: &mut Enigo, chr: u32, down: bool, _hotkey: bool) {
         }
     }
 
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    // RustDesk-Lu: on macOS, use key_sequence for non-hotkey character
+    // input to fix character mapping issues. On Windows, always fall
+    // through to key_down/key_up so AutoHotkey hotkeys can detect
+    // WM_KEYDOWN/WM_KEYUP events.
+    #[cfg(target_os = "macos")]
     if !_hotkey {
         if down {
             if let Ok(chr) = char::try_from(chr) {
