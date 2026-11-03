@@ -11,8 +11,8 @@ name: Update webpki-roots
 # branch, to run CI on it.
 
 on:
-  schedule:
-    - cron: "0 3 * * 1"
+  # schedule disabled 2026-11-04 by 璐哥哥: manual dispatch only
+  #   "0 3 * * 1"  # (moved under disabled schedule)
   workflow_dispatch:
 
 # A manual dispatch overlapping the weekly run would race it force-pushing
