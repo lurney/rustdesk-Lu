@@ -81,6 +81,8 @@ jobs:
           mkdir -p /tmp/lu-workflows
           cp .github/workflows/sync-upstream.yml /tmp/lu-workflows/
           cp .github/workflows/lu-tag-build.yml /tmp/lu-workflows/
+          cp .github/workflows/update-webpki-roots.yml /tmp/lu-workflows/
+          cp .github/workflows/flutter-nightly.yml /tmp/lu-workflows/
           cp scripts/apply-custom-patches.py /tmp/lu-workflows/
           git remote add upstream https://github.com/rustdesk/rustdesk.git
           git fetch upstream tag "${VERSION}" --no-tags
@@ -96,6 +98,8 @@ jobs:
           fi
           cp /tmp/lu-workflows/sync-upstream.yml .github/workflows/
           cp /tmp/lu-workflows/lu-tag-build.yml .github/workflows/
+          cp /tmp/lu-workflows/update-webpki-roots.yml .github/workflows/
+          cp /tmp/lu-workflows/flutter-nightly.yml .github/workflows/
           mkdir -p scripts  # upstream 1.5.x has no scripts/ dir after reset
           cp /tmp/lu-workflows/apply-custom-patches.py scripts/
           git add -A
