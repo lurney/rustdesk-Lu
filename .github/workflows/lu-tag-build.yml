@@ -1,0 +1,27 @@
+name: Lu Tag Build
+
+# Triggered by sync-upstream.yml pushing the "${VERSION}-Lu" tag.
+# Builds all platforms from the synced+patched commit and uploads the
+# artifacts into the "${VERSION}-Lu" draft release.
+
+on:
+  push:
+    tags:
+      - '*-Lu'
+  workflow_dispatch:
+    inputs:
+      upload-tag:
+        description: 'Release tag to upload artifacts to'
+        type: string
+        default: 'nightly'
+
+permissions:
+  contents: write
+
+jobs:
+  run-lu-tag-build:
+    uses: ./.github/workflows/flutter-build.yml
+    secrets: inherit
+    with:
+      upload-artifact: true
+      upload-tag: ${{ github.event_name == 'push' && github.ref_name || inputs.upload-tag }}

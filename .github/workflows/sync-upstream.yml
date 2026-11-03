@@ -1,0 +1,155 @@
+name: Sync Upstream and Build
+
+on:
+  schedule:
+    - cron: '0 18 * * *'
+  workflow_dispatch:
+    inputs:
+      force_rebuild:
+        description: 'Force rebuild even if version already exists'
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    outputs:
+      updated: ${{ steps.check.outputs.updated }}
+      version: ${{ steps.check.outputs.version }}
+    steps:
+      - name: Get latest upstream tag
+        id: upstream
+        run: |
+          LATEST=$(git ls-remote --tags https://github.com/rustdesk/rustdesk.git \
+            | grep -oP 'refs/tags/\K[0-9]+\.[0-9]+\.[0-9]+$' \
+            | sort -V | tail -1)
+          echo "Latest upstream tag: $LATEST"
+          echo "tag=$LATEST" >> $GITHUB_OUTPUT
+
+      - name: Check if already built
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="${{ steps.upstream.outputs.tag }}"
+          if gh release view "${TAG}-Lu" --repo ${{ github.repository }} >/dev/null 2>&1; then
+            EXISTING=yes
+          else
+            EXISTING=no
+          fi
+          if [ "$EXISTING" = "no" ] || [ "${{ inputs.force_rebuild }}" = "true" ]; then
+            echo "Need to build: ${TAG}-Lu"
+            echo "updated=true" >> $GITHUB_OUTPUT
+            echo "version=$TAG" >> $GITHUB_OUTPUT
+          else
+            echo "Already built: ${TAG}-Lu"
+            echo "updated=false" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Checkout our repo
+        if: steps.check.outputs.updated == 'true'
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          # PAT (not GITHUB_TOKEN) is REQUIRED for the push step below:
+          # pushes performed with the job's GITHUB_TOKEN do not trigger
+          # other workflows, so the "${VERSION}-Lu" tag push would never
+          # start lu-tag-build.yml (the full-platform build).
+          token: ${{ secrets.PAT_TOKEN }}
+
+      - name: Setup Python
+        if: steps.check.outputs.updated == 'true'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.x'
+
+      - name: Sync upstream code and apply patches
+        if: steps.check.outputs.updated == 'true'
+        run: |
+          VERSION="${{ steps.check.outputs.version }}"
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          # Save ONLY our Lu-specific workflow files before the hard reset.
+          # (The old blanket `cp -r .github /tmp && cp -r /tmp .github` both
+          # nested .github/lu-github/ by mistake AND restored already-patched
+          # files, breaking patch idempotency. Upstream-owned files must stay
+          # pristine across the reset so apply-custom-patches.py re-applies
+          # cleanly every sync.)
+          mkdir -p /tmp/lu-workflows
+          cp .github/workflows/sync-upstream.yml /tmp/lu-workflows/
+          cp .github/workflows/lu-tag-build.yml /tmp/lu-workflows/
+          cp scripts/apply-custom-patches.py /tmp/lu-workflows/
+          git remote add upstream https://github.com/rustdesk/rustdesk.git
+          git fetch upstream tag "${VERSION}" --no-tags
+          git reset --hard "FETCH_HEAD"
+          git submodule update --init --recursive
+          # flatten the hbb_common submodule into regular files
+          if [ -f ".gitmodules" ]; then
+            git submodule foreach --quiet 'echo $sm_path' | while read sm; do
+              git rm --cached "$sm" 2>/dev/null || true
+              rm -f "$sm/.git"
+            done
+            git rm -f .gitmodules
+          fi
+          cp /tmp/lu-workflows/sync-upstream.yml .github/workflows/
+          cp /tmp/lu-workflows/lu-tag-build.yml .github/workflows/
+          mkdir -p scripts  # upstream 1.5.x has no scripts/ dir after reset
+          cp /tmp/lu-workflows/apply-custom-patches.py scripts/
+          git add -A
+          git commit -m "Sync upstream v${VERSION}"
+          python3 scripts/apply-custom-patches.py
+          git add -A
+          git commit -m "Apply RustDesk-Lu patches on v${VERSION}"
+          git push origin main --force
+          git tag -f "${VERSION}-Lu" -m "RustDesk-Lu v${VERSION}"
+          git push origin "${VERSION}-Lu" --force
+
+      - name: Create draft release
+        if: steps.check.outputs.updated == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.check.outputs.version }}
+        run: |
+          cat > /tmp/release-notes.md << 'EOF'
+          ## RustDesk-Lu 定制构建（基于上游 v${VERSION}）
+
+          ### 本版本改动
+          1. 恢复「隐藏连接管理窗口」（hide_cm）选项——需永久密码 + 仅密码审批模式
+          2. 启用「修改 ID」功能，不受服务器限制
+          3. 自定义 ID 跳过 rendezvous 服务器校验（自建服务器友好）
+          4. 清除默认 rendezvous 服务器，启动不再自动连公共服务器
+          5. 「启动时检查软件更新」默认关闭
+          6. Windows 端键盘输入走 key_down/key_up，AutoHotkey 热键可正常检测（macOS 保持 key_sequence）
+          7. AppImage 构建作业已禁用（上游打包依赖已坏）
+
+          ### 使用方法
+          在 设置 - 网络 - ID/中继服务器 中配置你自己的服务器（如 hbbs/relay 地址与公钥）。
+
+          ### macOS（Apple Silicon，含 M4）安装注意
+          - 请下载 aarch64 版 dmg（原生 ARM 构建，无需 Rosetta）
+          - 本构建未做苹果签名与公证，首次打开会被 Gatekeeper 拦截，三选一放行：
+            1. 右键（双指点）App →「打开」→ 再点「打开」
+            2. 系统设置 → 隐私与安全性 → 底部「仍要打开」
+            3. 终端执行：xattr -dr com.apple.quarantine /Applications/RustDesk.app
+          - 首次远程前需手动授予：辅助功能、屏幕录制、输入监控 三项权限，否则只能观看无法控制
+          - 需要无人值守常驻的，请通过 dmg 内菜单安装为系统服务，配合本版的隐藏 CM + 永久密码使用
+
+          ### 其他平台
+          Windows 建议用 msi/exe（x86_64），Linux 直接 dpkg -i deb 即可，本包已去除官方默认服务器配置。
+          EOF
+          sed -i "s/\${VERSION}/${VERSION}/g" /tmp/release-notes.md
+          gh release create "${VERSION}-Lu" \
+            --repo "${{ github.repository }}" \
+            --title "RustDesk-Lu v${VERSION}" \
+            --notes-file /tmp/release-notes.md \
+            --draft
+
+  # NOTE on build triggering: the actual full-platform build is NOT started
+  # from this workflow. A job in the same run would still check out the
+  # pre-sync commit (runs are pinned to their triggering SHA). Instead, the
+  # "${VERSION}-Lu" tag pushed above triggers lu-tag-build.yml, whose run is
+  # pinned to the synced+patched commit and uploads artifacts into the
+  # draft release created above.
